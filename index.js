@@ -1,56 +1,62 @@
 import express from "express";
-import dotenv from "dotenv";
-import axios from "axios";
-import bodyParser from "body-parser";
 import fs from "fs";
-
+import axios from "axios";
+import dotenv from "dotenv";
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
 
-app.use(bodyParser.urlencoded({ extended: true }));
-app.use(bodyParser.json());
+// Cargar SSRs al inicio
+const ssrData = JSON.parse(fs.readFileSync("./ssrs.json", "utf-8"));
 
-// Cargar tu catálogo de SSRs desde ssrs.json
-const ssrCatalog = JSON.parse(fs.readFileSync("./ssrs.json", "utf-8"));
-
+// Endpoint para recibir solicitudes desde Slack
 app.post("/ssr", async (req, res) => {
-  const inputText = req.body.text || ""; // Ej: "-s MAAS, PETC"
-  const isShort = inputText.trim().startsWith("-s");
-  const rawSsrList = isShort ? inputText.replace("-s", "").trim() : inputText.trim();
+  const text = req.body.text || "";
+  const isShort = text.startsWith("-s ");
+  const ssrCodes = (isShort ? text.slice(3) : text).split(/[ ,]+/).filter(Boolean);
 
-  // Limpiar, separar y normalizar los SSRs ingresados
-  const ssrCodes = rawSsrList.split(",").map(code => code.trim().toUpperCase());
+  const known = [];
+  const unknown = [];
 
+  for (const code of ssrCodes) {
+    const upper = code.toUpperCase();
+    if (ssrData[upper]) {
+      known.push({ code: upper, meaning: ssrData[upper] });
+    } else {
+      unknown.push(upper);
+    }
+  }
+
+  // MODO CORTO
   if (isShort) {
-    // RESPUESTA CORTA: Buscar en el JSON
-    const result = {};
-    ssrCodes.forEach(code => {
-      result[code] = ssrCatalog[code] || "Código no reconocido";
-    });
-    return res.json(result);
-  } else {
-    // RESPUESTA LARGA: Enviar a OpenAI con catálogo incluido
-    const catalogText = Object.entries(ssrCatalog)
-      .map(([code, desc]) => `${code}: ${desc}`)
-      .join("\n");
+    const lines = known.map((item) => `"${item.code}": "${item.meaning}"`);
+    if (unknown.length > 0) {
+      lines.push(`⚠️ Sin definición: ${unknown.join(", ")}`);
+    }
+    return res.send(lines.join("\n"));
+  }
 
-    const prompt = `
-Eres un asistente de atención al cliente de una aerolínea. Usa el siguiente catálogo de SSRs como base:
+  // MODO LARGO (IA solo si hay desconocidos)
+  try {
+    let aiResponse = "";
+    if (unknown.length > 0) {
+      const prompt = `
+Soy un bot que interpreta SSR (Special Service Requests) de la aerolínea Volaris.
 
-${catalogText}
+Algunos códigos no están en el catálogo oficial. Por favor, intenta inferir su posible significado usando el contexto de vuelos comerciales **y asumiendo que los códigos están en inglés**, ya que son abreviaciones aeronáuticas.
 
-Con base en esta entrada: ${ssrCodes.join(", ")}
+Devuélvelo en español, y aclara que es una suposición no confirmada.
 
-Devuelve una explicación clara y útil de cada SSR para el equipo de atención o el agente. Responde en lenguaje profesional, breve y sin exageraciones.`;
-
-    try {
+Códigos SSR a interpretar: ${unknown.join(", ")}
+`;
       const response = await axios.post(
         "https://api.openai.com/v1/chat/completions",
         {
           model: "gpt-3.5-turbo",
           messages: [{ role: "user", content: prompt }],
+          max_tokens: 200,
         },
         {
           headers: {
@@ -59,22 +65,24 @@ Devuelve una explicación clara y útil de cada SSR para el equipo de atención 
           },
         }
       );
-
-      const answer = response.data.choices[0].message.content;
-      return res.send(answer);
-    } catch (error) {
-      console.error("Error con OpenAI:", error?.response?.data || error.message);
-      console.log("🔐 Clave de OpenAI:", process.env.OPENAI_API_KEY);
-      return res.status(500).send("Error al generar respuesta con OpenAI.");
-      
+      aiResponse = response.data.choices[0].message.content.trim();
     }
+
+    const knownLines = known.map(
+      (item) => `✅ ${item.code}: ${item.meaning}`
+    );
+
+    const finalResponse = [...knownLines, aiResponse].filter(Boolean).join("\n\n");
+
+    res.send(finalResponse);
+  } catch (error) {
+    console.error("Error al generar respuesta con OpenAI:", error.response?.data || error.message);
+    res.send("❌ Error al procesar tu solicitud con OpenAI.");
   }
 });
 
-app.get("/", (req, res) => {
-  res.send("✅ Volaris SSR Bot activo.");
-});
-
+// Inicializar servidor
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🚀 Servidor corriendo en http://localhost:${PORT}`);
+  console.log(`✅ Volaris SSR Bot activo en http://localhost:${PORT}`);
 });
