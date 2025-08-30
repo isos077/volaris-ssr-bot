@@ -42,6 +42,7 @@ app.post("/ssr", async (req, res) => {
   try {
     let aiResponse = "";
     if (unknown.length > 0) {
+      console.log("🔁 Consultando a OpenAI con:", unknown);
       const prompt = `
 Soy un bot que interpreta SSR (Special Service Requests) de la aerolínea Volaris.
 
